@@ -17,7 +17,7 @@ nvinfer1::ILogger& GetNVLogger(){
 	return s_TrtLogger;
 }
 
-int64_t ShapeVolume(const TENSOR_SHAPE &shape) {
+int64_t ShapeVolume(const tshape &shape) {
 	if (shape.empty()) {
 		return 0;
 	}
@@ -29,8 +29,8 @@ int64_t ShapeVolume(const TENSOR_SHAPE &shape) {
 	return nVol;
 }
 
-TENSOR_SHAPE Dims2Shape(const nvi::Dims &dims) {
-	TENSOR_SHAPE shape;
+tshape Dims2Shape(const nvi::Dims &dims) {
+	tshape shape;
 	for (int32_t i = 0; i < dims.nbDims; ++i) {
 		shape.push_back(dims.d[i]);
 	}
@@ -65,8 +65,7 @@ TRTContext::~TRTContext() {
 	}
 }
 
-void TRTContext::LoadModel(const std::string &strModelFile,
-		const std::map<std::string, TENSOR_SHAPE> &inputShapes) {
+void TRTContext::LoadModel(const std::string &strModelFile) {
 	CHECK_EQ(::cudaSetDevice(m_nGpuID), cudaSuccess);
 
 	std::string strModelBuf;
@@ -79,26 +78,12 @@ void TRTContext::LoadModel(const std::string &strModelFile,
 	m_pContext.reset(m_pEngine->createExecutionContext());
 	CHECK_NOTNULL(m_pContext);
 
+	std::map<std::string, tshape> inputShapes;
 	for (int32_t i = 0; i < m_pEngine->getNbBindings(); ++i) {
 		CHECK(m_pEngine->getBindingDataType(i) == nvi::DataType::kFLOAT);
 		if (m_pEngine->bindingIsInput(i)) {
 			std::string strName = m_pEngine->getBindingName(i);
-
 			auto dims = m_pContext->getBindingDimensions(i);
-			bool bDimsReset = false;
-			for (int32_t j = 0; j < dims.nbDims; ++j) {
-				if (dims.d[j] < 0) {
-					auto iInputShape = inputShapes.find(strName);
-					CHECK(iInputShape != inputShapes.end());
-					CHECK_EQ((int32_t)iInputShape->second.size(), dims.nbDims);
-					CHECK_GT(iInputShape->second[j], 0);
-					dims.d[j] = iInputShape->second[j];
-					bDimsReset = true;
-				}
-			}
-			if (bDimsReset) {
-				CHECK(m_pContext->setBindingDimensions(i, dims));
-			}
 			m_InputBuffers[strName] = __CreateBuf(Dims2Shape(dims));
 		}
 	}
@@ -153,7 +138,7 @@ void TRTContext::Inference() {
 	CHECK(m_pContext->executeV2(m_Bindings.data()));
 }
 
-TRTContext::GPU_MEM TRTContext::__CreateBuf(const TENSOR_SHAPE &shape) const {
+TRTContext::GPU_MEM TRTContext::__CreateBuf(const tshape &shape) const {
 	CHECK_EQ(::cudaSetDevice(m_nGpuID), cudaSuccess);
 	GPU_MEM gpuBuf(shape, nullptr);
 	auto nBufBytes = ShapeVolume(shape) * sizeof(float);

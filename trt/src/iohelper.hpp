@@ -21,4 +21,7 @@ json LoadJsonFile(const std::string &strFilename);
 
 int64_t GetNowTimeNS();
 
+std::vector<std::string> EnumerateFiles(const std::string &strPath,
+		const std::string &strPattern);
+
 #endif // _IOHELPER_HPP

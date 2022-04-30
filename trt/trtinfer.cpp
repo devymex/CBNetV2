@@ -1,5 +1,5 @@
-#include "trtctx.hpp"
-#include "iohelper.hpp"
+#include "src/trtctx.hpp"
+#include "src/iohelper.hpp"
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
@@ -30,205 +30,90 @@ _Stream& operator << (_Stream &stream, const nvinfer1::Dims &dims) {
 	return stream;
 }
 
+void LoadTensorBinFile(const std::string &strFilename, TRTContext::GPU_MEM &mem) {
+	std::string strBuf;
+	LoadFileContent(strFilename, strBuf);
+	CHECK_GT(strBuf.size(), 4);
+	uint8_t *pBuf = (uint8_t*)strBuf.data();
+
+	auto nDims = *(int32_t*)pBuf;
+	CHECK_GT(strBuf.size(), (nDims + 1) * sizeof(int32_t));
+	pBuf += sizeof(int32_t);
+
+	tshape shape;
+	for (int32_t d = 0; d < nDims; ++d) {
+		shape.push_back(*(int32_t*)pBuf);
+		pBuf += sizeof(int32_t);
+	}
+	auto nMemBytes = ShapeVolume(shape) * sizeof(float);
+	CHECK_EQ(strBuf.size(), (nDims + 1) * sizeof(int32_t) + nMemBytes);
+	
+	if (mem.first.empty()) {
+		CHECK(mem.second == nullptr);
+		CHECK_EQ(::cudaMalloc(&mem.second, nMemBytes), cudaSuccess);
+	} else {
+		CHECK(mem.first == shape);
+	}
+	CHECK_EQ(::cudaMemcpy(mem.second, (void*)pBuf, nMemBytes,
+		::cudaMemcpyHostToDevice), cudaSuccess);
+}
+
 int main(int nArgCnt, char *ppArgs[]) {
 	if (nArgCnt < 2) {
 		std::cout << "insufficient argument" << std::endl;
 		return -1;
 	}
-	auto jConf = LoadJsonFile(ppArgs[1]);
-
-	std::string strOnnxFilename = std::string(jConf["in_onnx"]);
-	std::string strTrtFilename = std::string(jConf["out_trt"]);
-	CHECK(stdfs::is_regular_file(strOnnxFilename)) << strOnnxFilename;
-
-	std::map<std::string, TENSOR_SHAPE> dynInputs;
-	if (jConf.contains("inputs")) {
-		for (auto jTensor: jConf["inputs"]) {
-			auto strName = std::string(jTensor["name"]);
-			auto jShape = jTensor["shape"];
-			TENSOR_SHAPE shape(jShape.size(), -1);
-			for (uint32_t i = 0; i < shape.size(); ++i) {
-				int32_t nInDim = int32_t(jShape[i]);
-				if (nInDim > 0) {
-					shape[i] = nInDim;
-				}
-			}
-			dynInputs[std::move(strName)] = std::move(shape);
-		}
+	json jConf;
+	if (ppArgs[1][0] == '{') {
+		jConf = json::parse(ppArgs[1]);
+	} else {
+		jConf = LoadJsonFile(ppArgs[1]);
 	}
 
-	LOG(INFO) << "Preparing device for converting...";
-	int nGpuID = 0;
-	if (jConf.contains("gpu_id")) {
-		nGpuID = uint32_t(jConf["gpu_id"]);
-		int nGpuCnt = 0;
-		CHECK_EQ(::cudaGetDeviceCount(&nGpuCnt), cudaSuccess);
-		nGpuID = std::min(nGpuID, nGpuCnt);
-	}
+	std::string strTrtFilename = std::string(jConf["trt_model"]);
+	std::string strDataPath = std::string(jConf["data_path"]);
+	CHECK(stdfs::is_directory(strDataPath));
+	auto nGpuID = (int32_t)jConf["gpu_id"];
+
 	CHECK_EQ(::cudaSetDevice(nGpuID), cudaSuccess);
+	TRTContext trtModel { (uint32_t)nGpuID };
+	trtModel.LoadModel(strTrtFilename);
 
-	std::unique_ptr<nvi::IBuilder, TrtDestroyer<nvi::IBuilder>> pBuilder(
-			nvi::createInferBuilder(GetNVLogger()));
-	CHECK_NOTNULL(pBuilder);
+	std::string strPattern = "^(.*)\\.in";
+	auto inputFiles = EnumerateFiles(strDataPath, strPattern);
+	auto inputNames = trtModel.GetInputNames();
 
-	const auto nFlag = 1U << static_cast<uint32_t>(
-			nvi::NetworkDefinitionCreationFlag::kEXPLICIT_BATCH);
-	std::unique_ptr<nvi::INetworkDefinition, TrtDestroyer<nvi::INetworkDefinition>> pNetwork(
-			pBuilder->createNetworkV2(nFlag));
-	CHECK_NOTNULL(pNetwork);
-
-	std::unique_ptr<onnx::IParser, TrtDestroyer<onnx::IParser>> pParser(
-			onnx::createParser(*pNetwork, GetNVLogger()));
-	CHECK_NOTNULL(pParser);
-
-	LOG(INFO) << "Loading ONNX model \"" << strOnnxFilename << "\"...";
-	CHECK(pParser->parseFromFile(strOnnxFilename.c_str(), 5));
-	for (int i = 0; i < pParser->getNbErrors(); ++i) {
-		LOG(INFO) << pParser->getError(i)->desc();
+	std::regex pattern(strPattern);
+	std::smatch matches;
+	for (auto &strInName: inputNames) {
+		auto iFound = std::find_if(inputFiles.begin(), inputFiles.end(),
+			[&](const std::string &strFilename){
+				auto strStem = stdfs::path(strFilename).filename().string();
+				std::regex_match(strStem, matches, pattern);
+				strStem = matches.str(1);
+				return strInName == strStem;
+			});
+		CHECK(iFound != inputFiles.end());
+		LoadTensorBinFile(*iFound, trtModel.GetInputBuffer(strInName));
 	}
-	CHECK_GE(pNetwork->getNbOutputs(), 1);
-	CHECK_GE(pNetwork->getNbInputs(), 1);
 
-	std::cout << "Layers Summary" << std::endl;
-	for (int i = 0; i < pNetwork->getNbLayers(); ++i) {
-		auto pLayer = pNetwork->getLayer(i);
-		std::ostringstream oss;
-		oss << "[" << i << "] \"" << pLayer->getName() << "\" has "
-			<< pLayer->getNbOutputs() << " outputs";
-		if (pLayer->getNbOutputs() > 0) {
-			oss << ":[";
-			for (int j = 0; j < pLayer->getNbOutputs(); ++j) {
-				oss << "" << j << ": \"" << pLayer->getOutput(j)->getName() << "\"";
-				if (j != pLayer->getNbOutputs() - 1) {
-					oss << ", ";
-				}
-			}
-			oss << "]";
+	trtModel.Inference();
+
+	std::string strOutData;
+	for (auto strName: trtModel.GetOutputNames()) {
+		auto outputBuf = trtModel.GetOutputBuffer(strName);
+		strOutData.resize(ShapeVolume(outputBuf.first) * sizeof(float));
+		CHECK_EQ(::cudaMemcpy((void*)strOutData.data(), outputBuf.second,
+				strOutData.size(), ::cudaMemcpyDeviceToHost), cudaSuccess);
+		auto filename = stdfs::path(strDataPath) / (strName + ".out");
+		std::ofstream outFile(filename, std::ios::binary);
+		int32_t nTmp = (int32_t)outputBuf.first.size();
+		outFile.write((char*)&nTmp, sizeof(nTmp));
+		for (auto d: outputBuf.first) {
+			nTmp = (int32_t)d;
+			outFile.write((char*)&nTmp, sizeof(nTmp));
 		}
-		std::cout << oss.str() << std::endl;
-	}
-	std::cout << std::string(70, '-') << std::endl;
-
-	if (jConf.contains("mark_outputs")) {
-		for (auto &jMarkOut: jConf["mark_outputs"]) {
-			auto iLayer = int(jMarkOut["i_layer"]);
-			auto iOutput = int(jMarkOut["i_output"]);
-			auto pMarkOut = pNetwork->getLayer(iLayer)->getOutput(iOutput);
-			pNetwork->markOutput(*pMarkOut);
-		}
-	}
-
-	if (jConf.contains("unmark_outputs")) {
-		for (auto &jMarkOut: jConf["unmark_outputs"]) {
-			auto iLayer = int(jMarkOut["i_layer"]);
-			auto iOutput = int(jMarkOut["i_output"]);
-			auto pMarkOut = pNetwork->getLayer(iLayer)->getOutput(iOutput);
-			pNetwork->unmarkOutput(*pMarkOut);
-		}
-	}
-
-	LOG(INFO) << "Converting...";
-	std::unique_ptr<nvi::IBuilderConfig, TrtDestroyer<nvi::IBuilderConfig>> pConfig(
-			pBuilder->createBuilderConfig());
-	CHECK_NOTNULL(pConfig);
-	pConfig->setMaxWorkspaceSize(1 << 30);
-	if (jConf.contains("data_type")) {
-		auto strDataType = std::string(jConf["data_type"]);
-		if (strDataType == "fp16") {
-			pConfig->setFlag(nvi::BuilderFlag::kFP16);
-		} else if (strDataType == "int8") {
-			LOG(FATAL) << "Unsupported data type: " << strDataType;
-		} else if (strDataType == "fp32") {
-		} else {
-			LOG(FATAL) << "Unsupported data type: " << strDataType;
-		}
-		LOG(INFO) << "Data type of computation: " << strDataType;
-	}
-
-	for (int32_t i = 0; i < pNetwork->getNbInputs(); ++i) {
-		auto pName = pNetwork->getInput(i)->getName();
-		auto oriDims = pNetwork->getInput(i)->getDimensions();
-		CHECK_GT(oriDims.nbDims, 0);
-		auto dims = oriDims;
-
-		for (int32_t j = 0; j < dims.nbDims; ++j) {
-			CHECK_NE(dims.d[j], 0);
-			if (dims.d[j] < 0) {
-				auto iInput = dynInputs.find(pName);
-				CHECK(iInput != dynInputs.end()) << pName;
-				CHECK_GT(iInput->second.size(), j);
-				CHECK_GT(iInput->second[j], 0);
-				dims.d[j] = iInput->second[j];
-			}
-		}
-		pNetwork->getInput(i)->setDimensions(dims);
-		std::ostringstream oss;
-		oss << "Input " << i << ": \"" << pName << "\" " << oriDims << " -> " << dims;
-		LOG(INFO) << oss.str();
-	}
-
-#if NV_TENSORRT_MAJOR < 8
-	std::unique_ptr<nvi::ICudaEngine, TrtDestroyer<nvi::ICudaEngine>> pEngine(
-			pBuilder->buildEngineWithConfig(*pNetwork, *pConfig));
-#else
-	std::unique_ptr<nvi::IHostMemory, TrtDestroyer<nvi::IHostMemory>> pNetMem(
-			pBuilder->buildSerializedNetwork(*pNetwork, *pConfig));
-	CHECK_NOTNULL(pNetMem);
-	std::unique_ptr<nvi::IRuntime, TrtDestroyer<nvi::IRuntime>> pRuntime{
-			nvi::createInferRuntime(GetNVLogger())};
-	CHECK_NOTNULL(pRuntime);
-	std::unique_ptr<nvi::ICudaEngine, TrtDestroyer<nvi::ICudaEngine>> pEngine(
-		pRuntime->deserializeCudaEngine(pNetMem->data(), pNetMem->size()));
-#endif
-	CHECK_NOTNULL(pEngine);
-
-	for (int32_t i = 0; i < pEngine->getNbBindings(); ++i) {
-		std::ostringstream oss; 
-		oss << "Binding " << i << "["
-			<< (pEngine->bindingIsInput(i) ? "I" : "O") << "]: \""
-			<< pEngine->getBindingName(i) << "\" "
-			<< pEngine->getBindingDimensions(i);
-		LOG(INFO) << oss.str();
-	}
-
-	std::unique_ptr<nvi::IHostMemory, TrtDestroyer<nvi::IHostMemory>> pHostMem(
-			pEngine->serialize());
-	CHECK_NOTNULL(pHostMem);
-
-	std::ofstream out_stream(strTrtFilename, std::ios::binary);
-	CHECK(out_stream.is_open());
-	out_stream.write((const char*)pHostMem->data(), pHostMem->size());
-	out_stream.close();
-
-	LOG(INFO) << "Done with \"" << strTrtFilename << "\".";
-
-	std::string strInFile, strOutPrefix;
-	if (jConf.contains("input_file")) {
-		strInFile = jConf["input_file"];
-	}
-	if (jConf.contains("output_prefix")) {
-		strOutPrefix = jConf["output_prefix"];
-	}
-	if (!strInFile.empty() && !strOutPrefix.empty()) {
-		std::string strInData, strOutData;
-		LoadFileContent(strInFile, strInData);
-
-		TRTContext trtModel { (uint32_t)nGpuID };
-		trtModel.LoadModel(strTrtFilename, dynInputs);
-		auto inputBuf = trtModel.GetInputBuffer(trtModel.GetInputNames()[0]);
-		CHECK_EQ(strInData.size(), ShapeVolume(inputBuf.first));
-
-		CHECK_EQ(::cudaMemcpy(inputBuf.second, (void*)strInData.data(),
-				strInData.size(), ::cudaMemcpyHostToDevice), cudaSuccess);
-		trtModel.Inference();
-	
-		for (auto strName: trtModel.GetOutputNames()) {
-			auto outputBuf = trtModel.GetOutputBuffer(strName);
-			strOutData.resize(ShapeVolume(outputBuf.first));
-			CHECK_EQ(::cudaMemcpy((void*)strOutData.data(), outputBuf.second,
-					strOutData.size(), ::cudaMemcpyDeviceToHost), cudaSuccess);
-			auto strOutFile = strOutPrefix + "_" + strName + ".out";
-		}
+		outFile.write(strOutData.data(), strOutData.size());
 	}
 	return 0;
 }

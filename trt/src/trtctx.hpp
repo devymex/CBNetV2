@@ -33,13 +33,13 @@ struct TrtDestroyer<CUstream_st> {
 	}
 };
 
-using TENSOR_SHAPE = std::vector<int32_t>;
+using tshape = std::vector<int32_t>;
 
-int64_t ShapeVolume(const TENSOR_SHAPE &shape);
+int64_t ShapeVolume(const tshape &shape);
 
 class TRTContext {
 public:
-	using GPU_MEM = std::pair<TENSOR_SHAPE, void*>;
+	using GPU_MEM = std::pair<tshape, void*>;
 
 private:
 	const uint32_t m_nGpuID = 0;
@@ -60,8 +60,7 @@ public:
 
 	virtual ~TRTContext();
 
-	void LoadModel(const std::string &strModelFile,
-			const std::map<std::string, TENSOR_SHAPE> &inputShapes);
+	void LoadModel(const std::string &strModelFile);
 
 	std::vector<std::string> GetInputNames() const;
 
@@ -78,7 +77,7 @@ public:
 	void Inference();
 
 private:
-	GPU_MEM __CreateBuf(const TENSOR_SHAPE &shape) const;
+	GPU_MEM __CreateBuf(const tshape &shape) const;
 };
 
 nvinfer1::ILogger& GetNVLogger();

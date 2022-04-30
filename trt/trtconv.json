@@ -1,0 +1,7 @@
+{
+    "gpu_id": 1,
+    "in_onnx": "trt/models/swintransformer.basiclayer0.swinblock0.mlp.onnx",
+    "out_trt": "trt/models/swintransformer.basiclayer0.swinblock0.mlp.trt",
+    "inputs": [{"name": "input", "shape": []}],
+    "data_type": "fp16"
+}
