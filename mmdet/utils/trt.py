@@ -4,7 +4,7 @@ class TrtHelper:
     def __init__(self, name):
         self.name = name
 
-    def trtinfer(self, inputs, out_names):
+    def trtinfer(self, inputs, out_names, test_cnt = 0):
         # export onnx
         onnx_file = f'trt/models/{self.name}.onnx'
         if not os.path.exists(onnx_file):
@@ -44,6 +44,8 @@ class TrtHelper:
             'trt_model': trt_file,
             'data_path': data_path
             }
+        if test_cnt > 0:
+            trtinfer['test_cnt'] = test_cnt
         subprocess.run(['build/trtinfer', json.dumps(trtinfer)])
 
         outputs = {}

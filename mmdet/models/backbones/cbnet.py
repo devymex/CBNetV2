@@ -481,9 +481,9 @@ class CBSwinTransformer(CBSwinTransformerImpl, trt.TrtHelper):
         inputs = {'x': x}
         gt_out = {}
         for i, out in enumerate(feats):
-            gt_out[f'outs{i}'] = out.cpu()
+            gt_out[f'out{i}'] = out.cpu()
 
-        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()), 100)
 
         for name in trt_out:
             diff = torch.abs(gt_out[name] - trt_out[name])

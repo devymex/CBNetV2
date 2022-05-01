@@ -5,6 +5,7 @@ import torch
 from ..builder import DETECTORS, build_backbone, build_head, build_neck
 from .base import BaseDetector
 
+import time
 
 @DETECTORS.register_module()
 class _TwoStageDetector(BaseDetector):
@@ -63,9 +64,13 @@ class _TwoStageDetector(BaseDetector):
 
     def extract_feat(self, img):
         """Directly extract features from the backbone+neck."""
+        t0 = time.time()
         x = self.backbone.Forward(img)
+        t1 = time.time()
         if self.with_neck:
             x = self.neck(x)
+        t2 = time.time()
+        print(f'backbone={t1 - t0}, neck={t2 - t1}')
         return x
 
     def forward_dummy(self, img):

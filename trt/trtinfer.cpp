@@ -99,6 +99,18 @@ int main(int nArgCnt, char *ppArgs[]) {
 
 	trtModel.Inference();
 
+	if (jConf.contains("test_cnt")) {
+		auto nTestCnt = (uint32_t)jConf["test_cnt"];
+		uint64_t nNanoSecs = 0;
+		for (uint32_t i = 0; i < nTestCnt; ++i) {
+			auto nBeg = GetNowTimeNS();
+			trtModel.Inference();
+			nNanoSecs += GetNowTimeNS() - nBeg;
+		}
+		auto dAvgInfTime = (double)nNanoSecs / nTestCnt / 1000. / 1000. / 1000.;
+		LOG(INFO) << "Average Inference Time: " << dAvgInfTime << "s";
+	}
+
 	std::string strOutData;
 	for (auto strName: trtModel.GetOutputNames()) {
 		auto outputBuf = trtModel.GetOutputBuffer(strName);

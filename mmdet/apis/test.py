@@ -23,37 +23,40 @@ def single_gpu_test(model,
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
+        for j in range(10):
+            with torch.no_grad():
+                t0 = time.time()
+                result = model(return_loss=False, rescale=True, **data)
+                print(f'model={time.time() - t0}')
 
-        batch_size = len(result)
-        if show or out_dir:
-            if batch_size == 1 and isinstance(data['img'][0], torch.Tensor):
-                img_tensor = data['img'][0]
-            else:
-                img_tensor = data['img'][0].data[0]
-            img_metas = data['img_metas'][0].data[0]
-            imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
-            assert len(imgs) == len(img_metas)
-
-            for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
-                h, w, _ = img_meta['img_shape']
-                img_show = img[:h, :w, :]
-
-                ori_h, ori_w = img_meta['ori_shape'][:-1]
-                img_show = mmcv.imresize(img_show, (ori_w, ori_h))
-
-                if out_dir:
-                    out_file = osp.join(out_dir, img_meta['ori_filename'])
+            batch_size = len(result)
+            if show or out_dir:
+                if batch_size == 1 and isinstance(data['img'][0], torch.Tensor):
+                    img_tensor = data['img'][0]
                 else:
-                    out_file = None
+                    img_tensor = data['img'][0].data[0]
+                img_metas = data['img_metas'][0].data[0]
+                imgs = tensor2imgs(img_tensor, **img_metas[0]['img_norm_cfg'])
+                assert len(imgs) == len(img_metas)
 
-                model.module.show_result(
-                    img_show,
-                    result[i],
-                    show=show,
-                    out_file=out_file,
-                    score_thr=show_score_thr)
+                for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
+                    h, w, _ = img_meta['img_shape']
+                    img_show = img[:h, :w, :]
+
+                    ori_h, ori_w = img_meta['ori_shape'][:-1]
+                    img_show = mmcv.imresize(img_show, (ori_w, ori_h))
+
+                    if out_dir:
+                        out_file = osp.join(out_dir, img_meta['ori_filename'])
+                    else:
+                        out_file = None
+
+                    model.module.show_result(
+                        img_show,
+                        result[i],
+                        show=show,
+                        out_file=out_file,
+                        score_thr=show_score_thr)
         break
         # encode mask results
         if isinstance(result[0], tuple):
