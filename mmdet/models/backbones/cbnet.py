@@ -286,7 +286,7 @@ class _SwinTransformer(_SwinTransformerImpl, trt.TrtHelper):
 
     def Forward(self, x: torch.Tensor, *cb_feats):
         gt_tmps = self.forward(x, *cb_feats)
-        # return gt_tmps
+        return gt_tmps
 
         inputs = {'x': x}
         if cb_feats is not None:
@@ -311,15 +311,33 @@ class _SwinTransformer(_SwinTransformerImpl, trt.TrtHelper):
 
         return tmps
 
-@BACKBONES.register_module()
-class CBSwinTransformer(BaseModule):
-    def __init__(self, embed_dim=96, cb_zero_init=True, cb_del_stages=1, **kwargs):
-        super(CBSwinTransformer, self).__init__()
+class SpatialInterpolate(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.H = None
+        self.W = None
+
+    def forward(self, x):
+        B, C = x.shape[:2]
+        if not hasattr(self, 'interp'):
+            self.interp = (self.H != x.shape[2] or self.W != x.shape[3])
+            self.upsample = nn.Upsample((self.H, self.W))
+
+        if self.interp:
+            # B, C, size[0], size[1]
+            # x = F.interpolate(x, size=(self.H, self.W), mode='nearest')
+            x = self.upsample(x)
+        x = x.view(B, C, -1).permute(0, 2, 1).contiguous()  # B, T, C
+        return x
+
+class CBSwinTransformerImpl(BaseModule):
+    def __init__(self, name:str, embed_dim=96, cb_zero_init=True, cb_del_stages=1, **kwargs):
+        super(CBSwinTransformerImpl, self).__init__()
         self.cb_zero_init = cb_zero_init
         self.cb_del_stages = cb_del_stages
         self.cb_modules = nn.ModuleList()
         for cb_idx in range(2):
-            cb_module = _SwinTransformer(name=f'cb_module{cb_idx}', embed_dim=embed_dim, **kwargs)
+            cb_module = _SwinTransformer(name=f'{name}.cb_module{cb_idx}', embed_dim=embed_dim, **kwargs)
             if cb_idx > 0:
                 cb_module.del_layers(cb_del_stages)
             self.cb_modules.append(cb_module)
@@ -329,8 +347,10 @@ class CBSwinTransformer(BaseModule):
         cb_inplanes = [embed_dim * 2 ** i for i in range(self.num_layers)]
 
         self.cb_linears = nn.ModuleList()
+        self.spatial_interpolate = nn.ModuleList()
         for i in range(self.num_layers):
             linears = nn.ModuleList()
+            interps = nn.ModuleList()
             if i >= self.cb_del_stages-1:
                 jrange = 4 - i
                 for j in range(jrange):
@@ -339,7 +359,9 @@ class CBSwinTransformer(BaseModule):
                     else:
                         layer = nn.Identity()
                     linears.append(layer)
+                    interps.append(SpatialInterpolate())
             self.cb_linears.append(linears)
+            self.spatial_interpolate.append(interps)
 
     def _freeze_stages(self):
         for m in self.cb_modules:
@@ -361,13 +383,16 @@ class CBSwinTransformer(BaseModule):
         for m in self.cb_modules:
             m.init_weights()
 
-    def spatial_interpolate(self, x, H, W):
-        B, C = x.shape[:2]
-        if H != x.shape[2] or W != x.shape[3]:
-            # B, C, size[0], size[1]
-            x = F.interpolate(x, size=(H, W), mode='nearest')
-        x = x.view(B, C, -1).permute(0, 2, 1).contiguous()  # B, T, C
-        return x
+    # def spatial_interpolate(self, x, H, W):
+    #     B, C = x.shape[:2]
+    #     if not hasattr(self, 'interp'):
+    #         self.interp = (H != x.shape[2] or W != x.shape[3])
+
+    #     if self.interp:
+    #         # B, C, size[0], size[1]
+    #         x = F.interpolate(x, size=(H, W), mode='nearest')
+    #     x = x.view(B, C, -1).permute(0, 2, 1).contiguous()  # B, T, C
+    #     return x
 
     def _get_cb_feats(self, feats, tmps):
         cb_feats = []
@@ -388,53 +413,52 @@ class CBSwinTransformer(BaseModule):
         outs = []
         feats = []
         tmps = self.cb_modules[0].Forward(x)
-        Wh = self.cb_modules[0].Wh
-        Ww = self.cb_modules[0].Ww
+
+        if not hasattr(self, 'feats_wh'):
+            Wh = self.cb_modules[1].Wh = self.cb_modules[0].Wh
+            Ww = self.cb_modules[1].Ww = self.cb_modules[0].Ww
+            self.feats_hw = []
+            for i in range(self.num_layers):
+                self.feats_hw.append((Wh, Ww))
+                Wh = (Wh + 1) // 2
+                Ww = (Ww + 1) // 2
+
         for i, x_out in enumerate(tmps[1:]):
             if i in self.cb_modules[0].out_indices:
                 norm_layer = getattr(self.cb_modules[0], f'norm{i}')
                 out = norm_layer(x_out)
-                out = out.view(-1, Wh, Ww, self.cb_modules[0].num_features[i])
+                out = out.view(-1, self.feats_hw[i][0], self.feats_hw[i][1],
+                        self.cb_modules[0].num_features[i])
                 out = out.permute(0, 3, 1, 2).contiguous()
                 feats.append(out)
-                Wh = (Wh + 1) // 2
-                Ww = (Ww + 1) // 2
 
         cb_feats = []
-        Wh = self.cb_modules[0].Wh
-        Ww = self.cb_modules[0].Ww
         for i in range(self.num_layers):
             feed = 0
             if i >= self.cb_del_stages-1:
                 jrange = 4 - i
                 for j in range(jrange):
                     tmp = self.cb_linears[i][j](feats[j + i])
-                    tmp = self.spatial_interpolate(tmp, Wh, Ww)
+                    self.spatial_interpolate[i][j].H = self.feats_hw[i][0]
+                    self.spatial_interpolate[i][j].W = self.feats_hw[i][1]
+                    tmp = self.spatial_interpolate[i][j](tmp)
                     feed += tmp
             cb_feats.append(feed)
-            Wh = (Wh + 1) // 2
-            Ww = (Ww + 1) // 2
-        outs.append(feats)
 
-        feats = []
-        Wh = self.cb_modules[1].Wh = self.cb_modules[0].Wh
-        Ww = self.cb_modules[1].Ww = self.cb_modules[0].Ww
         tmps = self.cb_modules[1].Forward(tmps[0], *cb_feats)
         for i, x_out in enumerate(tmps):
             if i in self.cb_modules[1].out_indices:
                 norm_layer = getattr(self.cb_modules[1], f'norm{i}')
                 out = norm_layer(x_out)
-                out = out.view(-1, Wh, Ww, self.cb_modules[1].num_features[i])
+                out = out.view(-1, self.feats_hw[i][0], self.feats_hw[i][1],
+                        self.cb_modules[1].num_features[i])
                 out = out.permute(0, 3, 1, 2).contiguous()
                 feats.append(out)
-                Wh = (Wh + 1) // 2
-                Ww = (Ww + 1) // 2
-        outs.append(feats)
-        return tuple(outs)
+        return feats
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
-        super(CBSwinTransformer, self).train(mode)
+        super(CBSwinTransformerImpl, self).train(mode)
         for m in self.cb_modules:
             m.train(mode=mode)
         self._freeze_stages()
@@ -443,3 +467,32 @@ class CBSwinTransformer(BaseModule):
             if isinstance(m, _BatchNorm):
                 m.eval()
 
+
+@BACKBONES.register_module()
+class CBSwinTransformer(CBSwinTransformerImpl, trt.TrtHelper):
+    def __init__(self, *args, **kwargs):
+        CBSwinTransformerImpl.__init__(self, 'backbone', *args, **kwargs)
+        trt.TrtHelper.__init__(self, 'backbone')
+
+    def Forward(self, x: torch.Tensor):
+        feats = self.forward(x)
+        # return (feats[:4], feats[4:])
+
+        inputs = {'x': x}
+        gt_out = {}
+        for i, out in enumerate(feats):
+            gt_out[f'outs{i}'] = out.cpu()
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = torch.abs(gt_out[name] - trt_out[name])
+            min, mean, median, max = diff.min().item(), diff.median().item(), \
+                    diff.mean().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')
+        
+        feats = []
+        for key in trt_out:
+            feats.append(trt_out[key].to(x.device))
+
+        return (feats[:4], feats[4:])
