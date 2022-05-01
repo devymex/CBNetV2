@@ -10,6 +10,8 @@ from .res2net import Res2Net
 from .swin_transformer import SwinTransformer
 
 from mmcv.runner import BaseModule
+import mmdet.utils.trt as trt
+
 '''
 For CNN
 '''
@@ -204,7 +206,7 @@ class CBRes2Net(_CBResNet):
 '''
 For Swin Transformer
 '''
-class _SwinTransformer(SwinTransformer):
+class _SwinTransformerImpl(SwinTransformer):
     def _freeze_stages(self):
         if self.frozen_stages >= 0 and hasattr(self, 'patch_embed'):
             self.patch_embed.eval()
@@ -235,52 +237,79 @@ class _SwinTransformer(SwinTransformer):
         for i in range(0, self.del_stages - 1):
             self.layers[i] = None
 
-    def forward(self, x, cb_feats=None, pre_tmps=None):
+    def forward(self, x, *cb_feats):
         """Forward function."""
         outs = []
-        tmps = []
         if hasattr(self, 'patch_embed'):
             x = self.patch_embed(x)
 
-            Wh, Ww = x.size(2), x.size(3)
+            if not hasattr(self, 'Wh'):
+                self.Wh = x.shape[2]
+            if not hasattr(self, 'Ww'):
+                self.Ww = x.shape[3]
             if self.ape:
                 # interpolate the position embedding to the corresponding size
                 absolute_pos_embed = F.interpolate(
-                    self.absolute_pos_embed, size=(Wh, Ww), mode='bicubic')
+                    self.absolute_pos_embed, size=(self.Wh, self.Ww), mode='bicubic')
                 x = (x + absolute_pos_embed).flatten(2).transpose(1, 2)  # B Wh*Ww C
             else:
                 x = x.flatten(2).transpose(1, 2)
             x = self.pos_drop(x)
-
-            tmps.append((x, Wh, Ww))
-        else:
-            x, Wh, Ww = pre_tmps[0]
+            outs.append(x)
 
         for i in range(self.num_layers):
             layer = self.layers[i]
-            if layer is None:
-                x_out, H, W, x, Wh, Ww = pre_tmps[i+1]
-            else:
-                if cb_feats is not None:
-                    x = x + cb_feats[i]
-                x_out, H, W, x, Wh, Ww = layer(x, Wh, Ww)
-            tmps.append((x_out, H, W, x, Wh, Ww))
+            if len(cb_feats) > 0:
+                x = x + cb_feats[i]
+            if layer.H is None or layer.W is None:
+                if i == 0:
+                    layer.H = self.Wh
+                    layer.W = self.Ww
+                else:
+                    layer.H = (self.layers[i - 1].H + 1) // 2
+                    layer.W = (self.layers[i - 1].W + 1) // 2
+            x_out, x = layer.Forward(x)
+            outs.append(x_out)
 
-            if i in self.out_indices:
-                norm_layer = getattr(self, f'norm{i}')
-                x_out = norm_layer(x_out)
-
-                out = x_out.view(-1, H, W,
-                                 self.num_features[i]).permute(0, 3, 1, 2).contiguous()
-                outs.append(out)
-
-        return tuple(outs), tmps
+        return outs
 
     def train(self, mode=True):
         """Convert the model into training mode while keep layers freezed."""
-        super(_SwinTransformer, self).train(mode)
+        super(_SwinTransformerImpl, self).train(mode)
         self._freeze_stages()
 
+
+class _SwinTransformer(_SwinTransformerImpl, trt.TrtHelper):
+    def __init__(self, name: str, *args, **kwargs):
+        _SwinTransformerImpl.__init__(self, name, *args, **kwargs)
+        trt.TrtHelper.__init__(self, name)
+
+    def Forward(self, x: torch.Tensor, *cb_feats):
+        gt_tmps = self.forward(x, *cb_feats)
+        # return gt_tmps
+
+        inputs = {'x': x}
+        if cb_feats is not None:
+            for i, feat in enumerate(cb_feats):
+                inputs[f'cb_feats{i}'] = feat.cpu()
+
+        gt_out = {}
+        for i, tmp in enumerate(gt_tmps):
+            gt_out[f'tmp{i}'] = tmp.cpu()
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = torch.abs(gt_out[name] - trt_out[name])
+            min, mean, median, max = diff.min().item(), diff.median().item(), \
+                    diff.mean().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')
+        
+        tmps = []
+        for key in trt_out:
+            tmps.append(trt_out[key].to(x.device))
+
+        return tmps
 
 @BACKBONES.register_module()
 class CBSwinTransformer(BaseModule):
@@ -290,7 +319,7 @@ class CBSwinTransformer(BaseModule):
         self.cb_del_stages = cb_del_stages
         self.cb_modules = nn.ModuleList()
         for cb_idx in range(2):
-            cb_module = _SwinTransformer(embed_dim=embed_dim, **kwargs)
+            cb_module = _SwinTransformer(name=f'cb_module{cb_idx}', embed_dim=embed_dim, **kwargs)
             if cb_idx > 0:
                 cb_module.del_layers(cb_del_stages)
             self.cb_modules.append(cb_module)
@@ -342,7 +371,38 @@ class CBSwinTransformer(BaseModule):
 
     def _get_cb_feats(self, feats, tmps):
         cb_feats = []
-        Wh, Ww = tmps[0][-2:]
+        for i in range(self.num_layers):
+            feed = 0
+            Wh, Ww = tmps[i][-2:]
+            if i >= self.cb_del_stages-1:
+                jrange = 4 - i
+                for j in range(jrange):
+                    tmp = self.cb_linears[i][j](feats[j + i])
+                    tmp = self.spatial_interpolate(tmp, Wh, Ww)
+                    feed += tmp
+            cb_feats.append(feed)
+
+        return cb_feats
+
+    def forward(self, x):
+        outs = []
+        feats = []
+        tmps = self.cb_modules[0].Forward(x)
+        Wh = self.cb_modules[0].Wh
+        Ww = self.cb_modules[0].Ww
+        for i, x_out in enumerate(tmps[1:]):
+            if i in self.cb_modules[0].out_indices:
+                norm_layer = getattr(self.cb_modules[0], f'norm{i}')
+                out = norm_layer(x_out)
+                out = out.view(-1, Wh, Ww, self.cb_modules[0].num_features[i])
+                out = out.permute(0, 3, 1, 2).contiguous()
+                feats.append(out)
+                Wh = (Wh + 1) // 2
+                Ww = (Ww + 1) // 2
+
+        cb_feats = []
+        Wh = self.cb_modules[0].Wh
+        Ww = self.cb_modules[0].Ww
         for i in range(self.num_layers):
             feed = 0
             if i >= self.cb_del_stages-1:
@@ -352,22 +412,24 @@ class CBSwinTransformer(BaseModule):
                     tmp = self.spatial_interpolate(tmp, Wh, Ww)
                     feed += tmp
             cb_feats.append(feed)
-            Wh, Ww = tmps[i+1][-2:]
+            Wh = (Wh + 1) // 2
+            Ww = (Ww + 1) // 2
+        outs.append(feats)
 
-        return cb_feats
-
-    def forward(self, x):
-        outs = []
-        for i, module in enumerate(self.cb_modules):
-            if i == 0:
-                feats, tmps = module(x)
-            else:
-                feats, tmps = module(x, cb_feats, tmps)
-
-            outs.append(feats)
-            
-            if i < len(self.cb_modules)-1:
-                cb_feats = self._get_cb_feats(outs[-1], tmps)  
+        feats = []
+        Wh = self.cb_modules[1].Wh = self.cb_modules[0].Wh
+        Ww = self.cb_modules[1].Ww = self.cb_modules[0].Ww
+        tmps = self.cb_modules[1].Forward(tmps[0], *cb_feats)
+        for i, x_out in enumerate(tmps):
+            if i in self.cb_modules[1].out_indices:
+                norm_layer = getattr(self.cb_modules[1], f'norm{i}')
+                out = norm_layer(x_out)
+                out = out.view(-1, Wh, Ww, self.cb_modules[1].num_features[i])
+                out = out.permute(0, 3, 1, 2).contiguous()
+                feats.append(out)
+                Wh = (Wh + 1) // 2
+                Ww = (Ww + 1) // 2
+        outs.append(feats)
         return tuple(outs)
 
     def train(self, mode=True):

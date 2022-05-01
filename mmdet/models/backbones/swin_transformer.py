@@ -18,7 +18,9 @@ from ..builder import BACKBONES
 
 from mmcv.runner import BaseModule
 
-class Mlp(nn.Module):
+import mmdet.utils.trt as trt
+
+class MlpImpl(nn.Module):
     """ Multilayer perceptron."""
 
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
@@ -39,39 +41,82 @@ class Mlp(nn.Module):
         return x
 
 
-def window_partition(x, window_size):
-    """
-    Args:
-        x: (B, H, W, C)
-        window_size (int): window size
+class Mlp(MlpImpl, trt.TrtHelper):
+    def __init__(self, name: str, *args, **kwargs):
+        MlpImpl.__init__(self, *args, **kwargs)
+        trt.TrtHelper.__init__(self, name)
 
-    Returns:
-        windows: (num_windows*B, window_size, window_size, C)
-    """
-    B, H, W, C = x.shape
-    x = x.view(B, H // window_size, window_size, W // window_size, window_size, C)
-    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
-    return windows
+    def Forward(self, in0: torch.Tensor):
+        out0 = self.forward(in0)
+        return out0
+
+        inputs = {'input': in0}
+        gt_out = {'output': out0.cpu()}
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = (gt_out[name] - trt_out[name]).pow(2)
+            min, mean, median, max = diff.min().item(), diff.mean().item(), \
+                    diff.median().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min}, mean={mean}, median={median}, max={max}')
+
+        return trt_out['output'].to(out0.device)
+
+class WindowPartition(nn.Module):
+    def __init__(self, window_size):
+        super().__init__()
+        self.window_size = window_size
+
+    def forward(self, x):
+        """
+        Args:
+            x: (B, H, W, C)
+            window_size (int): window size
+
+        Returns:
+            windows: (num_windows*B, window_size, window_size, C)
+        """
+        B, H, W, C = x.shape
+        if not hasattr(self, 'hn'):
+            self.hn = H // self.window_size
+        if not hasattr(self, 'wn'):
+            self.wn = W // self.window_size
+        x = x.view(B, self.hn, self.window_size, self.wn, self.window_size, C)
+        windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, self.window_size, self.window_size, C)
+        return windows
 
 
-def window_reverse(windows, window_size, H, W):
-    """
-    Args:
-        windows: (num_windows*B, window_size, window_size, C)
-        window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
+class WindowReverse(nn.Module):
+    def __init__(self, window_size, H, W):
+        super().__init__()
+        self.window_size = window_size
+        self.H = H
+        self.W = W
 
-    Returns:
-        x: (B, H, W, C)
-    """
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    x = windows.view(B, H // window_size, W // window_size, window_size, window_size, -1)
-    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, H, W, -1)
-    return x
+    def forward(self, windows):
+        """
+        Args:
+            windows: (num_windows*B, window_size, window_size, C)
+            window_size (int): Window size
+            H (int): Height of image
+            W (int): Width of image
+
+        Returns:
+            x: (B, H, W, C)
+        """
+        if not hasattr(self, 'B'):
+            self.B = int(windows.shape[0] / (self.H * self.W / self.window_size / self.window_size))
+        if not hasattr(self, 'hn'):
+            self.hn = self.H // self.window_size
+        if not hasattr(self, 'wn'):
+            self.wn = self.W // self.window_size
+        x = windows.view(self.B, self.hn, self.wn, self.window_size, self.window_size, -1)
+        x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(self.B, self.H, self.W, -1)
+        return x
 
 
-class WindowAttention(nn.Module):
+class WindowAttentionImpl(nn.Module):
     """ Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
 
@@ -119,6 +164,13 @@ class WindowAttention(nn.Module):
         trunc_normal_(self.relative_position_bias_table, std=.02)
         self.softmax = nn.Softmax(dim=-1)
 
+        slice_q = torch.FloatTensor([1, 0, 0]).reshape(1, 3)
+        slice_k = torch.FloatTensor([0, 1, 0]).reshape(1, 3)
+        slice_v = torch.FloatTensor([0, 0, 1]).reshape(1, 3)
+        self.register_buffer('slice_q', slice_q)
+        self.register_buffer('slice_k', slice_k)
+        self.register_buffer('slice_v', slice_v)
+
     def forward(self, x, mask=None):
         """ Forward function.
 
@@ -127,8 +179,17 @@ class WindowAttention(nn.Module):
             mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
         """
         B_, N, C = x.shape
-        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
-        q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
+        if not hasattr(self, "cn"):
+            self.cn = C // self.num_heads
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, self.cn).permute(2, 0, 3, 1, 4)
+
+        if True: # TRT
+            qkv = qkv.reshape(3, -1)
+            q = torch.matmul(self.slice_q, qkv).reshape(B_, self.num_heads, N, self.cn)
+            k = torch.matmul(self.slice_k, qkv).reshape(B_, self.num_heads, N, self.cn)
+            v = torch.matmul(self.slice_v, qkv).reshape(B_, self.num_heads, N, self.cn)
+        else:
+            q, k, v = qkv[0], qkv[1], qkv[2]  # make torchscript happy (cannot use tensor as tuple)
 
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
@@ -140,12 +201,11 @@ class WindowAttention(nn.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
+            if not hasattr(self, "bn"):
+                self.bn = B_ // nW
+            attn = attn.view(self.bn, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
             attn = attn.view(-1, self.num_heads, N, N)
-            attn = self.softmax(attn)
-        else:
-            attn = self.softmax(attn)
-
+        attn = self.softmax(attn)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
@@ -153,8 +213,31 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+class WindowAttention(WindowAttentionImpl, trt.TrtHelper):
+    def __init__(self, name: str, *args, **kwargs):
+        WindowAttentionImpl.__init__(self, *args, **kwargs)
+        trt.TrtHelper.__init__(self, name)
 
-class SwinTransformerBlock(nn.Module):
+    def Forward(self, x: torch.Tensor, mask: torch.Tensor):
+        out0 = self.forward(x, mask)
+        return out0
+
+        inputs = {'x': x}
+        if mask is not None:
+            inputs['mask'] = mask
+        gt_out = {'output': out0.cpu()}
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = (gt_out[name] - trt_out[name]).pow(2)
+            min, mean, median, max = diff.min().item(), diff.median().item(), \
+                    diff.mean().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')
+
+        return trt_out['output'].to(out0.device)
+
+class SwinTransformerBlockImpl(nn.Module):
     """ Swin Transformer Block.
 
     Args:
@@ -172,7 +255,7 @@ class SwinTransformerBlock(nn.Module):
         norm_layer (nn.Module, optional): Normalization layer.  Default: nn.LayerNorm
     """
 
-    def __init__(self, dim, num_heads, window_size=7, shift_size=0,
+    def __init__(self, name, dim, num_heads, window_size=7, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
                  act_layer=nn.GELU, norm_layer=nn.LayerNorm):
         super().__init__()
@@ -184,17 +267,18 @@ class SwinTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
+        self.attn = WindowAttention(f'{name}.attn',
             dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
             qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
+        self.mlp = Mlp(f'{name}.mlp', in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
         self.H = None
         self.W = None
+        self.window_partition = WindowPartition(self.window_size)
 
     def forward(self, x, mask_matrix):
         """ Forward function.
@@ -206,7 +290,7 @@ class SwinTransformerBlock(nn.Module):
         """
         B, L, C = x.shape
         H, W = self.H, self.W
-        assert L == H * W, "input feature has wrong size"
+        # assert L == H * W, "input feature has wrong size"
 
         shortcut = x
         x = self.norm1(x)
@@ -214,10 +298,19 @@ class SwinTransformerBlock(nn.Module):
 
         # pad feature maps to multiples of window size
         pad_l = pad_t = 0
-        pad_r = (self.window_size - W % self.window_size) % self.window_size
-        pad_b = (self.window_size - H % self.window_size) % self.window_size
-        x = F.pad(x, (0, 0, pad_l, pad_r, pad_t, pad_b))
-        _, Hp, Wp, _ = x.shape
+        if not hasattr(self, 'pad_r'):
+            self.pad_r = (self.window_size - W % self.window_size) % self.window_size
+        if not hasattr(self, 'pad_b'):
+            self.pad_b = (self.window_size - H % self.window_size) % self.window_size
+        if True: # TRT
+            x = x.permute(0, 3, 1, 2)
+            x = F.pad(x, (pad_l, self.pad_r, pad_t, self.pad_b))
+            x = x.permute(0, 2, 3, 1)
+        else:
+            x = F.pad(x, (0, 0, pad_l, self.pad_r, pad_t, self.pad_b))
+        if not hasattr(self, 'window_reverse'):
+            _, Hp, Wp, _ = x.shape
+            self.window_reverse = WindowReverse(self.window_size, Hp, Wp)
 
         # cyclic shift
         if self.shift_size > 0:
@@ -228,15 +321,15 @@ class SwinTransformerBlock(nn.Module):
             attn_mask = None
 
         # partition windows
-        x_windows = window_partition(shifted_x, self.window_size)  # nW*B, window_size, window_size, C
+        x_windows = self.window_partition(shifted_x)  # nW*B, window_size, window_size, C
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)  # nW*B, window_size*window_size, C
 
         # W-MSA/SW-MSA
-        attn_windows = self.attn(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
+        attn_windows = self.attn.Forward(x_windows, mask=attn_mask)  # nW*B, window_size*window_size, C
 
         # merge windows
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
-        shifted_x = window_reverse(attn_windows, self.window_size, Hp, Wp)  # B H' W' C
+        shifted_x = self.window_reverse(attn_windows)  # B H' W' C
 
         # reverse cyclic shift
         if self.shift_size > 0:
@@ -244,17 +337,38 @@ class SwinTransformerBlock(nn.Module):
         else:
             x = shifted_x
 
-        if pad_r > 0 or pad_b > 0:
+        if self.pad_r > 0 or self.pad_b > 0:
             x = x[:, :H, :W, :].contiguous()
 
         x = x.view(B, H * W, C)
 
         # FFN
         x = shortcut + self.drop_path(x)
-        x = x + self.drop_path(self.mlp(self.norm2(x)))
+        x = x + self.drop_path(self.mlp.Forward(self.norm2(x)))
 
         return x
 
+class SwinTransformerBlock(SwinTransformerBlockImpl, trt.TrtHelper):
+    def __init__(self, name: str, *args, **kwargs):
+        SwinTransformerBlockImpl.__init__(self, name, *args, **kwargs)
+        trt.TrtHelper.__init__(self, name)
+
+    def Forward(self, x: torch.Tensor, mask_matrix: torch.Tensor):
+        out0 = self.forward(x, mask_matrix)
+        return out0
+
+        inputs = {'x': x, 'mask_matrix': mask_matrix}
+        gt_out = {'output': out0.cpu()}
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = torch.abs(gt_out[name] - trt_out[name])
+            min, mean, median, max = diff.min().item(), diff.median().item(), \
+                    diff.mean().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')
+
+        return trt_out['output'].to(out0.device)
 
 class PatchMerging(nn.Module):
     """ Patch Merging Layer
@@ -268,8 +382,10 @@ class PatchMerging(nn.Module):
         self.dim = dim
         self.reduction = nn.Linear(4 * dim, 2 * dim, bias=False)
         self.norm = norm_layer(4 * dim)
+        self.H = None
+        self.W = None
 
-    def forward(self, x, H, W):
+    def forward(self, x):
         """ Forward function.
 
         Args:
@@ -277,20 +393,47 @@ class PatchMerging(nn.Module):
             H, W: Spatial resolution of the input feature.
         """
         B, L, C = x.shape
-        assert L == H * W, "input feature has wrong size"
+        # assert L == H * W, "input feature has wrong size"
 
-        x = x.view(B, H, W, C)
+        x = x.view(B, self.H, self.W, C)
 
         # padding
-        pad_input = (H % 2 == 1) or (W % 2 == 1)
-        if pad_input:
-            x = F.pad(x, (0, 0, 0, W % 2, 0, H % 2))
+        if not hasattr(self, 'pad_input'):
+            self.pad_input = (self.H % 2 == 1) or (self.W % 2 == 1)
+            self.pad_h = self.H % 2
+            self.pad_w = self.W % 2
+            self.half_h = self.H // 2
+            self.half_w = self.W // 2
+        if self.pad_input:
+            x = x.permute(0, 3, 1, 2)
+            x = F.pad(x, (0, self.pad_w, 0, self.pad_h))
+            x = x.permute(0, 2, 3, 1)
 
-        x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
-        x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
-        x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
-        x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
-        x = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+        # x0 = x[:, 0::2, 0::2, :]  # B H/2 W/2 C
+        # x1 = x[:, 1::2, 0::2, :]  # B H/2 W/2 C
+        # x2 = x[:, 0::2, 1::2, :]  # B H/2 W/2 C
+        # x3 = x[:, 1::2, 1::2, :]  # B H/2 W/2 C
+        # y = torch.cat([x0, x1, x2, x3], -1)  # B H/2 W/2 4*C
+
+        if not hasattr(self, 'conv_w'):
+            conv_w = torch.stack([
+                torch.Tensor([[1., 0.], [0., 0.]]),
+                torch.Tensor([[0., 0.], [1., 0.]]),
+                torch.Tensor([[0., 1.], [0., 0.]]),
+                torch.Tensor([[0., 0.], [0., 1.]])
+                ]).to(torch.float32)
+            conv_w = conv_w.unsqueeze(1).repeat(C, 1, 1, 1)
+            conv_w.requires_grad = False
+            self.register_buffer('conv_w', conv_w)
+            self.conv_w = self.conv_w.to(x.device)
+
+        x = x.reshape(B, self.H, self.W, C).permute(0, 3, 1, 2)
+        x = F.conv2d(x, weight=self.conv_w, bias=None, stride=2, padding=0, groups=C)
+        x = x.reshape([B, C, 4, self.half_h, self.half_w])
+        x = x.permute(0, 3, 4, 2, 1).flatten(3)
+        # z = torch.abs(x - y).sum()
+        # print(z.item())
+
         x = x.view(B, -1, 4 * C)  # B H/2*W/2 4*C
 
         x = self.norm(x)
@@ -299,7 +442,7 @@ class PatchMerging(nn.Module):
         return x
 
 
-class BasicLayer(nn.Module):
+class BasicLayerImpl(nn.Module):
     """ A basic Swin Transformer layer for one stage.
 
     Args:
@@ -319,6 +462,7 @@ class BasicLayer(nn.Module):
     """
 
     def __init__(self,
+                 name,
                  dim,
                  depth,
                  num_heads,
@@ -341,6 +485,7 @@ class BasicLayer(nn.Module):
         # build blocks
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(
+                name = f'{name}.swinblock{i}',
                 dim=dim,
                 num_heads=num_heads,
                 window_size=window_size,
@@ -360,7 +505,11 @@ class BasicLayer(nn.Module):
         else:
             self.downsample = None
 
-    def forward(self, x, H, W):
+        self.H = None
+        self.W = None
+        self.window_partition = WindowPartition(self.window_size)
+
+    def forward(self, x):
         """ Forward function.
 
         Args:
@@ -369,39 +518,69 @@ class BasicLayer(nn.Module):
         """
 
         # calculate attention mask for SW-MSA
-        Hp = int(np.ceil(H / self.window_size)) * self.window_size
-        Wp = int(np.ceil(W / self.window_size)) * self.window_size
-        img_mask = torch.zeros((1, Hp, Wp, 1), device=x.device)  # 1 Hp Wp 1
-        h_slices = (slice(0, -self.window_size),
-                    slice(-self.window_size, -self.shift_size),
-                    slice(-self.shift_size, None))
-        w_slices = (slice(0, -self.window_size),
-                    slice(-self.window_size, -self.shift_size),
-                    slice(-self.shift_size, None))
-        cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
-                cnt += 1
+        if not hasattr(self, 'Hp'):
+            self.Hp = int(np.ceil(self.H / self.window_size)) * self.window_size
+        if not hasattr(self, 'Wp'):
+            self.Wp = int(np.ceil(self.W / self.window_size)) * self.window_size
+        if not hasattr(self, 'img_mask'):
+            img_mask = torch.zeros((1, self.Hp, self.Wp, 1))  # 1 Hp Wp 1
+            h_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            w_slices = (slice(0, -self.window_size),
+                        slice(-self.window_size, -self.shift_size),
+                        slice(-self.shift_size, None))
+            cnt = 0
+            for h in h_slices:
+                for w in w_slices:
+                    img_mask[:, h, w, :] = cnt
+                    cnt += 1
+            self.register_buffer("img_mask", img_mask)
+            img_mask.requires_grad = False
+            self.img_mask = self.img_mask.to(x.device)
 
-        mask_windows = window_partition(img_mask, self.window_size)  # nW, window_size, window_size, 1
+        mask_windows = self.window_partition(self.img_mask)  # nW, window_size, window_size, 1
         mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
         attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
 
         for blk in self.blocks:
-            blk.H, blk.W = H, W
+            blk.H, blk.W = self.H, self.W
             if self.use_checkpoint:
                 x = checkpoint.checkpoint(blk, x, attn_mask)
             else:
-                x = blk(x, attn_mask)
+                x = blk.Forward(x, attn_mask)
         if self.downsample is not None:
-            x_down = self.downsample(x, H, W)
-            Wh, Ww = (H + 1) // 2, (W + 1) // 2
-            return x, H, W, x_down, Wh, Ww
+            self.downsample.H = self.H
+            self.downsample.W = self.W
+            x_down = self.downsample(x)
+            #Wh, Ww = (self.H + 1) // 2, (self.W + 1) // 2
+            return x, x_down #, Wh, Ww
         else:
-            return x, H, W, x, H, W
+            return x, x #, self.H, self.W
 
+
+class BasicLayer(BasicLayerImpl, trt.TrtHelper):
+    def __init__(self, name: str, *args, **kwargs):
+        BasicLayerImpl.__init__(self, name, *args, **kwargs)
+        trt.TrtHelper.__init__(self, name)
+
+    def Forward(self, x: torch.Tensor):
+        x_out, x_down = self.forward(x)
+        return x_out, x_down
+
+        inputs = {'x': x}
+        gt_out = {'x_out': x_out.cpu(), 'x_down': x_down.cpu()}
+
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()))
+
+        for name in trt_out:
+            diff = torch.abs(gt_out[name] - trt_out[name])
+            min, mean, median, max = diff.min().item(), diff.median().item(), \
+                    diff.mean().item(), diff.max().item()
+            print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')
+
+        return trt_out['x_out'].to(x_out.device), trt_out['x_down'].to(x_down.device)
 
 class PatchEmbed(nn.Module):
     """ Image to Patch Embedding
@@ -431,10 +610,20 @@ class PatchEmbed(nn.Module):
         """Forward function."""
         # padding
         _, _, H, W = x.size()
-        if W % self.patch_size[1] != 0:
-            x = F.pad(x, (0, self.patch_size[1] - W % self.patch_size[1]))
-        if H % self.patch_size[0] != 0:
-            x = F.pad(x, (0, 0, 0, self.patch_size[0] - H % self.patch_size[0]))
+        if not hasattr(self, 'pad_w'):
+            if W % self.patch_size[1] != 0:
+                self.pad_w = self.patch_size[1] - W % self.patch_size[1]
+            else:
+                self.pad_w = 0
+
+        if not hasattr(self, 'pad_h'):
+            if H % self.patch_size[0] != 0:
+                self.pad_h = self.patch_size[0] - H % self.patch_size[0]
+            else:
+                self.pad_h = 0
+
+        if self.pad_w != 0 or self.pad_h != 0:
+            x = F.pad(x, (0, self.pad_w, 0, self.pad_h))
 
         x = self.proj(x)  # B C Wh Ww
         if self.norm is not None:
@@ -480,6 +669,7 @@ class SwinTransformer(BaseModule):
     """
 
     def __init__(self,
+                 name,
                  pretrain_img_size=224,
                  patch_size=4,
                  in_chans=3,
@@ -537,6 +727,7 @@ class SwinTransformer(BaseModule):
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
+                name=f'{name}.basiclayer{i_layer}',
                 dim=int(embed_dim * 2 ** i_layer),
                 depth=depths[i_layer],
                 num_heads=num_heads[i_layer],
