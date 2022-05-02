@@ -25,7 +25,8 @@ class TrtHelper:
                 }
             for name in inputs:
                 trtconv['inputs'].append({'name': name, 'shape': []})
-            subprocess.run(['build/trtconv', json.dumps(trtconv)])
+            trtconv = json.dumps(trtconv)
+            subprocess.run(['build/trtconv', trtconv])
 
         # store input data
         data_path = f'trt/data/{self.name}'
@@ -46,7 +47,8 @@ class TrtHelper:
             }
         if test_cnt > 0:
             trtinfer['test_cnt'] = test_cnt
-        subprocess.run(['build/trtinfer', json.dumps(trtinfer)])
+        trtinfer = json.dumps(trtinfer)
+        subprocess.run(['build/trtinfer', trtinfer])
 
         outputs = {}
         for filename in os.listdir(data_path):
