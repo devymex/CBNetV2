@@ -1,12 +1,7 @@
 #ifndef _TRTCTX_HPP
 #define _TRTCTX_HPP
 
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
-#include <NvInferPlugin.h>
-#include <NvInfer.h>
-#pragma GCC diagnostic pop
-
+#include "sampleReporting.h"
 #include <cuda_runtime.h>
 #include <functional>
 #include <map>
@@ -51,6 +46,8 @@ private:
 	std::unique_ptr<nvi::IRuntime, TrtDestroyer<nvi::IRuntime>> m_pNvRuntime;
 	std::unique_ptr<nvi::ICudaEngine, TrtDestroyer<nvi::ICudaEngine>> m_pEngine;
 	std::unique_ptr<nvi::IExecutionContext, TrtDestroyer<nvi::IExecutionContext>> m_pContext;
+	std::unique_ptr<sample::Profiler> m_pProfiler;
+	std::string m_strReportFile;
 
 	std::mutex m_InferLock;
 	std::vector<void*> m_Bindings;
@@ -75,6 +72,8 @@ public:
 	const GPU_MEM& GetOutputBuffer(const std::string &strName) const;
 
 	void Inference();
+
+	void SetReportFile(const std::string &strReportFile);
 
 private:
 	GPU_MEM __CreateBuf(const tshape &shape) const;

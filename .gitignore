@@ -123,3 +123,4 @@ work_dirs/
 # trt
 trt/models/
 trt/data/
+trt/results

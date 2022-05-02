@@ -1,6 +1,7 @@
 #include "trtctx.hpp"
 #include "iohelper.hpp"
 #include <numeric>
+#include <fstream>
 
 class Logger : public nvi::ILogger {
 public:
@@ -136,6 +137,23 @@ void TRTContext::Inference() {
 	std::lock_guard<std::mutex> locker(m_InferLock);
 	CHECK_EQ(::cudaSetDevice(m_nGpuID), cudaSuccess);
 	CHECK(m_pContext->executeV2(m_Bindings.data()));
+	if (!m_strReportFile.empty()) {
+		std::ofstream reportFile(m_strReportFile);
+		m_pProfiler->print(reportFile);
+	}
+}
+
+void TRTContext::SetReportFile(const std::string &strReportFile) {
+	CHECK_NOTNULL(m_pContext);
+	if (!strReportFile.empty()) {
+		if (m_pProfiler == nullptr) {
+			m_pProfiler.reset(new sample::Profiler);
+		}
+		m_pContext->setProfiler(m_pProfiler.get());
+	} else {
+		m_pContext->setProfiler(nullptr);
+	}
+	m_strReportFile = strReportFile;
 }
 
 TRTContext::GPU_MEM TRTContext::__CreateBuf(const tshape &shape) const {

@@ -98,18 +98,26 @@ int main(int nArgCnt, char *ppArgs[]) {
 	}
 
 	trtModel.Inference();
+	std::string strReportFile;
+	if (jConf.contains("report_file")) {
+		strReportFile = (std::string)jConf["report_file"];
+	}
+	trtModel.SetReportFile(strReportFile);
 
 	if (jConf.contains("test_cnt")) {
 		auto nTestCnt = (uint32_t)jConf["test_cnt"];
-		uint64_t nNanoSecs = 0;
-		for (uint32_t i = 0; i < nTestCnt; ++i) {
-			auto nBeg = GetNowTimeNS();
-			trtModel.Inference();
-			nNanoSecs += GetNowTimeNS() - nBeg;
+		if (nTestCnt > 0) {
+			uint64_t nNanoSecs = 0;
+			for (uint32_t i = 0; i < nTestCnt; ++i) {
+				auto nBeg = GetNowTimeNS();
+				trtModel.Inference();
+				nNanoSecs += GetNowTimeNS() - nBeg;
+			}
+			auto dAvgInfTime = (double)nNanoSecs / nTestCnt / 1000. / 1000. / 1000.;
+			LOG(INFO) << "Average Inference Time: " << dAvgInfTime << "s";
 		}
-		auto dAvgInfTime = (double)nNanoSecs / nTestCnt / 1000. / 1000. / 1000.;
-		LOG(INFO) << "Average Inference Time: " << dAvgInfTime << "s";
 	}
+
 
 	std::string strOutData;
 	for (auto strName: trtModel.GetOutputNames()) {
