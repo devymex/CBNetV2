@@ -4,14 +4,20 @@ class TrtHelper:
     def __init__(self, name):
         self.name = name
 
-    def trtinfer(self, inputs, out_names, test_cnt = 0):
+    def trtinfer(self, inputs, out_names, dynamic_batch = False, test_cnt = 0):
         # export onnx
         onnx_file = f'trt/models/{self.name}.onnx'
         if not os.path.exists(onnx_file):
             input_shapes = {}
             for name in inputs:
                 input_shapes[name] = inputs[name].shape
-            export_onnx(self, input_shapes, out_names, onnx_file)
+            dynamic_axes = {}
+            if dynamic_batch:
+                for name in inputs:
+                    dynamic_axes[name] = {0: 'batch'}
+                for name in out_names:
+                    dynamic_axes[name] = {0: 'batch'}
+            export_onnx(self, input_shapes, out_names, dynamic_axes, onnx_file)
 
         # convert to trt
         trt_file = f'trt/models/{self.name}.trt'
@@ -43,7 +49,8 @@ class TrtHelper:
         trtinfer = {
             'gpu_id': 1,
             'trt_model': trt_file,
-            'data_path': data_path
+            'data_path': data_path,
+            'report_file': f'trt/results/{self.name}.prof'
             }
         if test_cnt > 0:
             trtinfer['test_cnt'] = test_cnt
@@ -73,13 +80,12 @@ class TrtHelper:
                 outputs[os.path.splitext(filename)[0]] = vals
         return outputs
 
-def export_onnx(model: torch.nn.Module, input_shapes: dict,
-                output_names: typing.List[str], onnx_filename: str):
+def export_onnx(model: torch.nn.Module, input_shapes: dict, output_names: typing.List[str],
+        dynamic_axes: dict, onnx_filename: str):
     model.eval()
     input_names = list(input_shapes.keys())
 
     sample_inputs = []
-    dynamic_axes = {}
     for name in input_names:
         sample_inputs.append(torch.zeros(input_shapes[name], requires_grad=False))
     sample_inputs = tuple(sample_inputs)

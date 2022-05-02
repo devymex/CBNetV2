@@ -3,5 +3,5 @@
     "trt_model": "trt/models/backbone.trt",
     "data_path": "trt/data/backbone",
     "test_cnt": 100,
-    "report_file": "trt/results/backbone1.prof"
+    "report_file": "trt/results/backbone.prof"
 }

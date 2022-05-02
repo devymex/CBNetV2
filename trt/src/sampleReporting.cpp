@@ -280,33 +280,25 @@ void Profiler::print(std::ostream& os) const
     const auto percentageLength = percentageHdr.size();
 
     os << std::endl
-       << "=== Profile (" << mUpdatesCount << " iterations ) ===" << std::endl
-       << std::setw(nameLength) << nameHdr << timeHdr << avgHdr << percentageHdr << std::endl;
+       << "=== Profile (" << mUpdatesCount << " iterations ) ===" << std::endl;
 
     auto &mutableLayers = const_cast<std::vector<LayerProfile>&>(mLayers);
     // std::sort(mutableLayers.begin(), mutableLayers.end(),
     //         [](const LayerProfile &l1, const LayerProfile &l2){
     //             return l1.timeMs > l2.timeMs;
     //         });
+    uint32_t ilayer = 0;
     for (const auto& p : mLayers)
     {
 // clang off
-        os << std::setw(nameLength)                                             << p.name
-           << std::setw(timeLength)       << std::fixed << std::setprecision(2) << p.timeMs
-           << std::setw(avgLength)        << std::fixed << std::setprecision(4) << p.timeMs / mUpdatesCount
-           << std::setw(percentageLength) << std::fixed << std::setprecision(1) << p.timeMs / totalTimeMs * 100
-           << std::endl;
+        os << ilayer++ << "\t" << p.name << "\t" << p.timeMs / mUpdatesCount
+            << "\t" << p.timeMs / totalTimeMs * 100 << std::endl;
     }
     {
-        os << std::setw(nameLength)                                             << "Total"
-           << std::setw(timeLength)       << std::fixed << std::setprecision(2) << totalTimeMs
-           << std::setw(avgLength)        << std::fixed << std::setprecision(4) << totalTimeMs / mUpdatesCount
-           << std::setw(percentageLength) << std::fixed << std::setprecision(1) << 100.0
-           << std::endl;
+        os << "Total" << "\t" << totalTimeMs / mUpdatesCount
+            << "\t" << 100.0 << std::endl;
 // clang on
     }
-    os << std::endl;
-
 }
 
 void Profiler::exportJSONProfile(const std::string& fileName) const

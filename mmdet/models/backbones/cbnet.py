@@ -475,15 +475,16 @@ class CBSwinTransformer(CBSwinTransformerImpl, trt.TrtHelper):
         trt.TrtHelper.__init__(self, 'backbone')
 
     def Forward(self, x: torch.Tensor):
+        # x = torch.concat((x, x))
         feats = self.forward(x)
         # return (feats[:4], feats[4:])
 
-        inputs = {'x': x}
+        inputs = {'x': x.cpu()}
         gt_out = {}
         for i, out in enumerate(feats):
             gt_out[f'out{i}'] = out.cpu()
 
-        trt_out = self.trtinfer(inputs, list(gt_out.keys()), 100)
+        trt_out = self.trtinfer(inputs, list(gt_out.keys()), False, 100)
 
         for name in trt_out:
             diff = torch.abs(gt_out[name] - trt_out[name])

@@ -101,8 +101,8 @@ int main(int nArgCnt, char *ppArgs[]) {
 	std::string strReportFile;
 	if (jConf.contains("report_file")) {
 		strReportFile = (std::string)jConf["report_file"];
+		trtModel.SetReportFile(strReportFile);
 	}
-	trtModel.SetReportFile(strReportFile);
 
 	if (jConf.contains("test_cnt")) {
 		auto nTestCnt = (uint32_t)jConf["test_cnt"];
