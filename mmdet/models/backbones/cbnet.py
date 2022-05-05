@@ -487,7 +487,7 @@ class CBSwinTransformer(CBSwinTransformerImpl, trt.TrtHelper):
         trt_out = self.trtinfer(inputs, list(gt_out.keys()), False, 100)
 
         for name in trt_out:
-            diff = torch.abs(gt_out[name] - trt_out[name])
+            diff = torch.abs(gt_out[name] - trt_out[name].cpu())
             min, mean, median, max = diff.min().item(), diff.median().item(), \
                     diff.mean().item(), diff.max().item()
             print(f'{self.name}.{name}: min={min:.2e}, median={median:.2e}, mean={mean:.2e}, max={max:.2e}')

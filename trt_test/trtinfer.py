@@ -1,67 +1,42 @@
-import os, numpy as np
-import pycuda.autoinit
-import pycuda.driver as cuda
-import tensorrt as trt
+import os, torch, tensorrt as trt
 
 TRT_LOGGER = trt.Logger(trt.Logger.WARNING)
-
-class HostDeviceMem(object):
-    def __init__(self, shape, host_mem, device_mem):
-        self.shape = shape
-        self.host = host_mem
-        self.device = device_mem
-
-    def __str__(self):
-        return "Host:\n" + str(self.host) + "\nDevice:\n" + str(self.device)
-
-    def __repr__(self):
-        return self.__str__()
 
 class TRTInference(object):
     def __init__(self, model_file):
         trt.init_libnvinfer_plugins(TRT_LOGGER, '')
-        self.stream = cuda.Stream()
         self.trt_runtime = trt.Runtime(TRT_LOGGER)
 
         assert os.path.exists(model_file)
         engine_data = open(model_file, 'rb').read()
         self.trt_engine = self.trt_runtime.deserialize_cuda_engine(engine_data)
+        self.context = self.trt_engine.create_execution_context()
 
-        self.input_buffers = {}
-        self.output_buffers = {}
+        # for i in range(self.trt_engine.num_bindings):
+        #     bname = self.trt_engine.get_binding_name(i)
+        #     bshape = self.trt_engine.get_binding_shape(index=i)
+        #     print(bname, bshape)
+
+    def inference(self, inputs, stream):
         self.bindings = []
+        device = torch.device("cuda")
         for i in range(self.trt_engine.num_bindings):
             bname = self.trt_engine.get_binding_name(i)
             bshape = self.trt_engine.get_binding_shape(index=i)
             print(bname, bshape)
-            buf = self._create_buf(bshape)
-            self.bindings.append(buf.device)
             if self.trt_engine.binding_is_input(index=i):
-                self.input_buffers[bname] = buf
+                assert list(bshape) == list(inputs[bname].shape)
+                if inputs[bname].device == device and inputs[bname].is_contiguous():
+                    self.input_buffers[bname] = inputs[bname]
+                else:
+                    self.input_buffers[bname] = inputs[bname].to(device,
+                        memory_format=torch.contiguous_format)
+                self.bindings.append(self.input_buffers[bname].data_ptr())
             else:
-                self.output_buffers[bname] = buf
+                if bname not in self.output_buffers:
+                    self.output_buffers[bname] = torch.empty(size=list(bshape),
+                        dtype=torch.float32, device=device).contiguous()
+                self.bindings.append(self.output_buffers[bname].data_ptr())
+        self.context.execute_async_v2(self.bindings, stream.cuda_stream)
+        return self.output_buffers
 
-        self.context = self.trt_engine.create_execution_context()
-
-    def inference(self, inputs):
-        for name in inputs:
-            buf = self.input_buffers[name]
-            assert buf.shape == inputs[name].shape
-            np.copyto(buf.host, inputs[name].ravel())
-            cuda.memcpy_htod_async(buf.device, buf.host, self.stream)
-        self.context.execute_async_v2(bindings=self.bindings, stream_handle=self.stream.handle)
-        outputs = {}
-        for name in self.output_buffers:
-            buf = self.output_buffers[name]
-            cuda.memcpy_dtoh_async(buf.host, buf.device, self.stream)
-            outputs[name] = np.reshape(buf.host, buf.shape)
-        self.stream.synchronize()
-        return outputs
-
-    def _create_buf(self, shape):
-        size = trt.volume(shape)
-        dtype = np.float32
-        # Allocate host and device buffers
-        host_mem = cuda.pagelocked_empty(size, dtype)
-        device_mem = cuda.mem_alloc(host_mem.nbytes)
-        return HostDeviceMem(shape, host_mem, device_mem)

@@ -7,7 +7,7 @@ class TrtHelper:
 
     def trtinfer(self, inputs, out_names, dynamic_batch = False, test_cnt = 0):
         # export onnx
-        onnx_file = f'trt/models/{self.name}.onnx'
+        onnx_file = f'trt_test/models/{self.name}.onnx'
         if not os.path.exists(onnx_file):
             input_shapes = {}
             for name in inputs:
@@ -21,7 +21,7 @@ class TrtHelper:
             export_onnx(self, input_shapes, out_names, dynamic_axes, onnx_file)
 
         # convert to trt
-        trt_file = f'trt/models/{self.name}.trt'
+        trt_file = f'trt_test/models/{self.name}.trt'
         if not os.path.exists(trt_file):
             trtconv = {
                 'gpu_id': 2,
@@ -36,12 +36,16 @@ class TrtHelper:
             subprocess.run(['build/trtconv', trtconv])
         
         model = TRTInference(trt_file)
-        outputs = model.inference(inputs)
+        print( torch.cuda.current_stream().cuda_stream)
+        outputs = model.inference(inputs, torch.cuda.current_stream())
+        # outputs = {}
+        # for name in numpy_res:
+        #     outputs[name] = torch.tensor(numpy_res[name])
         return outputs
 
 
         # store input data
-        data_path = f'trt/data/{self.name}'
+        data_path = f'trt_test/data/{self.name}'
         os.makedirs(data_path, exist_ok=True)
         for name in inputs:
             bin_file = open(os.path.join(data_path, f'{name}.in'), 'wb')
@@ -56,7 +60,7 @@ class TrtHelper:
             'gpu_id': 1,
             'trt_model': trt_file,
             'data_path': data_path,
-            'report_file': f'trt/results/{self.name}.prof'
+            'report_file': f'trt_test/results/{self.name}.prof'
             }
         if test_cnt > 0:
             trtinfer['test_cnt'] = test_cnt
