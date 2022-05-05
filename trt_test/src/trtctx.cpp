@@ -79,7 +79,6 @@ void TRTContext::LoadModel(const std::string &strModelFile) {
 	m_pContext.reset(m_pEngine->createExecutionContext());
 	CHECK_NOTNULL(m_pContext);
 
-	std::map<std::string, tshape> inputShapes;
 	for (int32_t i = 0; i < m_pEngine->getNbBindings(); ++i) {
 		CHECK(m_pEngine->getBindingDataType(i) == nvi::DataType::kFLOAT);
 		if (m_pEngine->bindingIsInput(i)) {

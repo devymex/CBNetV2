@@ -1,4 +1,5 @@
 import torch, os, subprocess, json, array, typing, numpy as np
+from trt_test.trtinfer import TRTInference
 
 class TrtHelper:
     def __init__(self, name):
@@ -33,6 +34,11 @@ class TrtHelper:
                 trtconv['inputs'].append({'name': name, 'shape': []})
             trtconv = json.dumps(trtconv)
             subprocess.run(['build/trtconv', trtconv])
+        
+        model = TRTInference(trt_file)
+        outputs = model.inference(inputs)
+        return outputs
+
 
         # store input data
         data_path = f'trt/data/{self.name}'

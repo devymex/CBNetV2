@@ -121,6 +121,6 @@ work_dirs/
 *.sh~
 
 # trt
-trt/models/
-trt/data/
-trt/results
+trt_test/models/
+trt_test/data/
+trt_test/results

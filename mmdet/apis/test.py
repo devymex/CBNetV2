@@ -12,6 +12,8 @@ from mmcv.runner import get_dist_info
 
 from mmdet.core import encode_mask_results
 
+import cProfile, pstats, io
+
 
 def single_gpu_test(model,
                     data_loader,
@@ -23,10 +25,17 @@ def single_gpu_test(model,
     dataset = data_loader.dataset
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
-        for j in range(10):
+        pr = cProfile.Profile()
+        for j in range(2):
             with torch.no_grad():
                 t0 = time.time()
+                torch.cuda.synchronize()
+                if j == 1:
+                    pr.enable()
                 result = model(return_loss=False, rescale=True, **data)
+                torch.cuda.synchronize()
+                if j == 1:
+                    pr.disable()
                 print(f'model={time.time() - t0}')
 
             batch_size = len(result)
@@ -57,6 +66,12 @@ def single_gpu_test(model,
                         show=show,
                         out_file=out_file,
                         score_thr=show_score_thr)
+        s = io.StringIO()
+        sortby = pstats.SortKey.CUMULATIVE
+        ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+        ps.print_stats()
+        print(s.getvalue())
+        pr.dump_stats("pipeline.prof")
         break
         # encode mask results
         if isinstance(result[0], tuple):

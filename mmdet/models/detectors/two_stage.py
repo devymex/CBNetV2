@@ -66,9 +66,11 @@ class _TwoStageDetector(BaseDetector):
         """Directly extract features from the backbone+neck."""
         t0 = time.time()
         x = self.backbone.Forward(img)
+        torch.cuda.synchronize()
         t1 = time.time()
         if self.with_neck:
             x = self.neck(x)
+        torch.cuda.synchronize()
         t2 = time.time()
         print(f'backbone={t1 - t0}, neck={t2 - t1}')
         return x
@@ -177,14 +179,19 @@ class _TwoStageDetector(BaseDetector):
         """Test without augmentation."""
 
         assert self.with_bbox, 'Bbox head must be implemented.'
+        t0 = time.time()
         x = self.extract_feat(img)
+        t1 = time.time()
         if proposals is None:
             proposal_list = self.rpn_head.simple_test_rpn(x, img_metas)
         else:
             proposal_list = proposals
-
-        return self.roi_head.simple_test(
+        t2 = time.time()
+        ret = self.roi_head.simple_test(
             x, proposal_list, img_metas, rescale=rescale)
+        t3 = time.time()
+        print(f'feat={t1 - t0}, rpn={t2 - t1}, roi={t3 - t2}')
+        return ret
 
     def aug_test(self, imgs, img_metas, rescale=False):
         """Test with augmentations.
