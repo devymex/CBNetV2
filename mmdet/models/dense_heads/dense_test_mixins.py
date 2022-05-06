@@ -120,14 +120,14 @@ class BBoxTestMixin(object):
             list[Tensor]: Proposals of each image, each item has shape (n, 5),
                 where 5 represent (tl_x, tl_y, br_x, br_y, score).
         """
-        t0 = time.time()
+        # t0 = time.time()
         rpn_outs = self(x)
-        torch.cuda.synchronize()
-        t1 = time.time()
+        # torch.cuda.synchronize()
+        # t1 = time.time()
         proposal_list = self.get_bboxes(*rpn_outs, img_metas)
-        torch.cuda.synchronize()
-        t2 = time.time()
-        print(f'rpn_out={t1-t0}, get_box={t2-t1}, ')
+        # torch.cuda.synchronize()
+        # t2 = time.time()
+        # print(f'rpn_out={t1-t0}, get_box={t2-t1}, ')
         return proposal_list
 
     def aug_test_rpn(self, feats, img_metas):

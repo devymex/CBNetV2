@@ -39,7 +39,7 @@ ENDIF()
 
 # Build trtconv
 # ------------------
-FILE(GLOB_RECURSE SRC_FILES "${CMAKE_SOURCE_DIR}/trt/src/*.cpp" "${CMAKE_SOURCE_DIR}/trt/trtconv.cpp")
+FILE(GLOB_RECURSE SRC_FILES "${CMAKE_SOURCE_DIR}/trt_test/src/*.cpp" "${CMAKE_SOURCE_DIR}/trt_test/trtconv.cpp")
 ADD_EXECUTABLE(trtconv ${SRC_FILES})
 SET_SOURCE_FILES_PROPERTIES(${CUDA_KERNELS_SRC}
     PROPERTIES
@@ -78,7 +78,7 @@ TARGET_LINK_LIBRARIES(trtconv
 
 # Build trtinfer
 # ------------------
-FILE(GLOB_RECURSE SRC_FILES "${CMAKE_SOURCE_DIR}/trt/src/*.cpp" "${CMAKE_SOURCE_DIR}/trt/trtinfer.cpp")
+FILE(GLOB_RECURSE SRC_FILES "${CMAKE_SOURCE_DIR}/trt_test/src/*.cpp" "${CMAKE_SOURCE_DIR}/trt_test/trtinfer.cpp")
 ADD_EXECUTABLE(trtinfer ${SRC_FILES})
 SET_SOURCE_FILES_PROPERTIES(${CUDA_KERNELS_SRC}
     PROPERTIES

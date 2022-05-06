@@ -326,14 +326,14 @@ class HybridTaskCascadeRoIHead(CascadeRoIHead):
         return losses
 
     def simple_test(self, x, proposal_list, img_metas, rescale=False):
-        t0 = time.time() # 0.0023s
+        # t0 = time.time() # 0.0023s
         """Test without augmentation."""
         if self.with_semantic:
             _, semantic_feat = self.semantic_head(x)
         else:
             semantic_feat = None
 
-        t1 = time.time() # 0.0668s
+        # t1 = time.time() # 0.0668s
         num_imgs = len(proposal_list)
         img_shapes = tuple(meta['img_shape'] for meta in img_metas)
         ori_shapes = tuple(meta['ori_shape'] for meta in img_metas)
@@ -367,7 +367,7 @@ class HybridTaskCascadeRoIHead(CascadeRoIHead):
                     for i in range(num_imgs)
                 ])
 
-        t2 = time.time() # 0.0278s
+        # t2 = time.time() # 0.0278s
         # average scores of each image by stages
         cls_score = [
             sum([score[i] for score in ms_scores]) / float(len(ms_scores))
@@ -395,7 +395,7 @@ class HybridTaskCascadeRoIHead(CascadeRoIHead):
         ]
         ms_bbox_result['ensemble'] = bbox_result
 
-        t3 = time.time()# 0.1140
+        # t3 = time.time()# 0.1140
         if self.with_mask:
             if all(det_bbox.shape[0] == 0 for det_bbox in det_bboxes):
                 mask_classes = self.mask_head[-1].num_classes
@@ -460,8 +460,8 @@ class HybridTaskCascadeRoIHead(CascadeRoIHead):
                 zip(ms_bbox_result['ensemble'], ms_segm_result['ensemble']))
         else:
             results = ms_bbox_result['ensemble']
-        t4 = time.time()
-        print(f'roi_t0={t1-t0}, roi_t1={t2-t1}, roi_t2={t3-t2}, roi_t3={t4-t3}')
+        # t4 = time.time()
+        # print(f'roi_t0={t1-t0}, roi_t1={t2-t1}, roi_t2={t3-t2}, roi_t3={t4-t3}')
 
         return results
 

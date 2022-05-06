@@ -26,17 +26,17 @@ def single_gpu_test(model,
     prog_bar = mmcv.ProgressBar(len(dataset))
     for i, data in enumerate(data_loader):
         pr = cProfile.Profile()
-        for j in range(2):
+        for j in range(1):
             with torch.no_grad():
-                t0 = time.time()
-                torch.cuda.synchronize()
-                if j == 1:
-                    pr.enable()
+                # t0 = time.time()
+                # torch.cuda.synchronize()
+                # if j == 1:
+                #     pr.enable()
                 result = model(return_loss=False, rescale=True, **data)
-                torch.cuda.synchronize()
-                if j == 1:
-                    pr.disable()
-                print(f'model={time.time() - t0}')
+                # torch.cuda.synchronize()
+                # if j == 1:
+                #     pr.disable()
+                # print(f'model={time.time() - t0}')
 
             batch_size = len(result)
             if show or out_dir:
@@ -66,13 +66,13 @@ def single_gpu_test(model,
                         show=show,
                         out_file=out_file,
                         score_thr=show_score_thr)
-        s = io.StringIO()
-        sortby = pstats.SortKey.CUMULATIVE
-        ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
-        ps.print_stats()
-        print(s.getvalue())
-        pr.dump_stats("pipeline.prof")
-        break
+        # s = io.StringIO()
+        # sortby = pstats.SortKey.CUMULATIVE
+        # ps = pstats.Stats(pr, stream=s).sort_stats(sortby)
+        # ps.print_stats()
+        # print(s.getvalue())
+        # pr.dump_stats("pipeline.prof")
+        # break
         # encode mask results
         if isinstance(result[0], tuple):
             result = [(bbox_results, encode_mask_results(mask_results))

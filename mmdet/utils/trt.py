@@ -4,6 +4,7 @@ from trt_test.trtinfer import TRTInference
 class TrtHelper:
     def __init__(self, name):
         self.name = name
+        self.model = None
 
     def trtinfer(self, inputs, out_names, dynamic_batch = False, test_cnt = 0):
         # export onnx
@@ -34,10 +35,10 @@ class TrtHelper:
                 trtconv['inputs'].append({'name': name, 'shape': []})
             trtconv = json.dumps(trtconv)
             subprocess.run(['build/trtconv', trtconv])
-        
-        model = TRTInference(trt_file)
-        print( torch.cuda.current_stream().cuda_stream)
-        outputs = model.inference(inputs, torch.cuda.current_stream())
+
+        if self.model is None:
+            self.model = TRTInference(trt_file)
+        outputs = self.model.inference(inputs, torch.cuda.current_stream())
         # outputs = {}
         # for name in numpy_res:
         #     outputs[name] = torch.tensor(numpy_res[name])

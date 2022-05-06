@@ -81,7 +81,7 @@ int main(int nArgCnt, char *ppArgs[]) {
 	CHECK_NOTNULL(pParser);
 
 	// LOG(INFO) << "Loading ONNX model \"" << strOnnxFilename << "\"...";
-	CHECK(pParser->parseFromFile(strOnnxFilename.c_str(), 5));
+	CHECK(pParser->parseFromFile(strOnnxFilename.c_str(), 0));
 	for (int i = 0; i < pParser->getNbErrors(); ++i) {
 		// LOG(INFO) << pParser->getError(i)->desc();
 	}

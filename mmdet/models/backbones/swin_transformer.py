@@ -51,7 +51,7 @@ class Mlp(MlpImpl, trt.TrtHelper):
         return out0
 
         inputs = {'input': in0}
-        gt_out = {'output': out0.cpu()}
+        gt_out = {'output': out0}
 
         trt_out = self.trtinfer(inputs, list(gt_out.keys()))
 
@@ -61,7 +61,7 @@ class Mlp(MlpImpl, trt.TrtHelper):
                     diff.median().item(), diff.max().item()
             print(f'{self.name}.{name}: min={min}, mean={mean}, median={median}, max={max}')
 
-        return trt_out['output'].to(out0.device)
+        return trt_out['output']
 
 class WindowPartition(nn.Module):
     def __init__(self, window_size):
@@ -485,7 +485,7 @@ class BasicLayerImpl(nn.Module):
         # build blocks
         self.blocks = nn.ModuleList([
             SwinTransformerBlock(
-                name = f'{name}.swinblock{i}',
+                name = f'{name}.block{i}',
                 dim=dim,
                 num_heads=num_heads,
                 window_size=window_size,
@@ -727,7 +727,7 @@ class SwinTransformer(BaseModule):
         self.layers = nn.ModuleList()
         for i_layer in range(self.num_layers):
             layer = BasicLayer(
-                name=f'{name}.basiclayer{i_layer}',
+                name=f'{name}.layer{i_layer}',
                 dim=int(embed_dim * 2 ** i_layer),
                 depth=depths[i_layer],
                 num_heads=num_heads[i_layer],

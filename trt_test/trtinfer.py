@@ -25,7 +25,7 @@ class TRTInference(object):
         for i in range(self.trt_engine.num_bindings):
             bname = self.trt_engine.get_binding_name(i)
             bshape = self.trt_engine.get_binding_shape(index=i)
-            print(bname, bshape)
+            # print(bname, bshape)
             if self.trt_engine.binding_is_input(index=i):
                 assert list(bshape) == list(inputs[bname].shape)
                 if inputs[bname].device == device and inputs[bname].is_contiguous():
